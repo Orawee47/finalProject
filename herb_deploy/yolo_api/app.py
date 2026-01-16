@@ -24,7 +24,7 @@ app.add_middleware(
 
 # ====== 2) ตั้งค่าไฟล์โมเดล ======
 # แนะนำให้เปลี่ยนชื่อไฟล์โมเดลให้ไม่มีวงเล็บ/ช่องว่าง เช่น YOLOv8s_lr4.pt
-MODEL_PATH = os.getenv("MODEL_PATH", "models/YOLOv8s_lr4.pt")
+MODEL_PATH = os.getenv("MODEL_PATH", "models/YOLOv8s.pt")
 
 # ====== 3) บังคับชื่อคลาสตาม data.yaml ของคุณ (ลำดับสำคัญมาก) ======
 CUSTOM_NAMES = [
@@ -100,3 +100,4 @@ async def predict(file: UploadFile = File(...)):
         # ส่ง error ออกไปให้เห็นชัด (และ Render Logs จะมีด้วย)
         print("❌ /predict ERROR:", repr(e))
         return JSONResponse(status_code=500, content={"error": str(e)})
+

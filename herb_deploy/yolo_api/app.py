@@ -7,17 +7,22 @@ import io
 
 app = FastAPI()
 
-# ===== CORS (ตอนทดสอบใช้ "*" ได้ก่อน / ตอนใช้งานจริงค่อยล็อกโดเมน) =====
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ทดสอบก่อน
+    allow_origins=["*"],  # ทดสอบก่อน / ขึ้นจริงค่อยเปลี่ยนเป็นโดเมน netlify
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-MODEL_PATH = "C:/herb_deploy/models/yolov8s(lr-4).pt"
-model = YOLO(MODEL_PATH)
+MODEL_PATH = "models/yolov8s(lr-4).pt"
+model = None
+
+def get_model():
+    global model
+    if model is None:
+        model = YOLO(MODEL_PATH)
+    return model
 
 @app.get("/health")
 def health():
@@ -28,7 +33,7 @@ async def predict(file: UploadFile = File(...)):
     image_bytes = await file.read()
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    results = model(img)
+    results = get_model()(img)
     r = results[0]
 
     preds = []

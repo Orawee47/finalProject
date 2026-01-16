@@ -15,7 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_PATH = "models/yolov8s(lr-4).pt"
+MODEL_PATH = "models/yolov8s.pt"
 model = None
 
 def get_model():
@@ -52,3 +52,4 @@ async def predict(file: UploadFile = File(...)):
             })
 
     return JSONResponse({"predictions": preds})
+

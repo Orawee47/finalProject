@@ -1,25 +1,39 @@
-from fastapi import FastAPI, UploadFile, File
-from PIL import Image
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from PIL import Image, UnidentifiedImageError
 import torch
 import torchvision.transforms as T
-from model import load_model
+from model import load_model  # ถ้า deploy แล้วหาไม่เจอ ค่อยเปลี่ยนเป็น from skin_deploy.model import load_model
 
 app = FastAPI()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = load_model(device=device)
 transform = T.ToTensor()
+
+model = None  # จะโหลดตอน startup
+
+@app.on_event("startup")
+def startup():
+    global model
+    model = load_model(device=device)
+    model.eval()
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    img = Image.open(file.file).convert("RGB")
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    try:
+        img = Image.open(file.file).convert("RGB")
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
     x = transform(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
         output = model(x)[0]
 
     return {
-        "boxes": output["boxes"].cpu().tolist(),
-        "scores": output["scores"].cpu().tolist(),
-        "labels": output["labels"].cpu().tolist()
+        "boxes": output["boxes"].detach().cpu().tolist(),
+        "scores": output["scores"].detach().cpu().tolist(),
+        "labels": output["labels"].detach().cpu().tolist()
     }

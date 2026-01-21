@@ -10,7 +10,7 @@ MODEL_URL = os.environ.get(
 )
 
 # ✅ PATH ต้องเป็น path ในเครื่อง ไม่ใช่ URL
-MODEL_DIR = "C:\skin_train_10_01_69\results_maskrcnn\run_baseline_lr005\checkpoints"
+MODEL_DIR = "C:/skin_train_10_01_69/results_maskrcnn/run_baseline_lr005/checkpoints"
 MODEL_FILENAME = "best_map5095.pth"
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
 

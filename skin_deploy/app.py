@@ -16,7 +16,13 @@ def startup():
     global model
     model = load_model(device=device)
     model.eval()
-
+@app.get("/health")
+def health_check():
+    return {
+        "status": "ok",
+        "service": "skin-maskrcnn-api"
+    }
+    
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     if model is None:

@@ -2,20 +2,12 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from PIL import Image, UnidentifiedImageError
 import torch
 import torchvision.transforms as T
-from model import load_model  # ถ้า deploy แล้วหาไม่เจอ ค่อยเปลี่ยนเป็น from skin_deploy.model import load_model
+from model import load_model
 
 app = FastAPI(title="Skin Mask R-CNN API", version="1.0")
 
-# -------------------------
-# CONFIG
-# -------------------------
-CONF_THRES = 0.5   # ปรับได้ เช่น 0.3 ถ้าอยากให้เจอง่ายขึ้น
-TOPK = 200         # จำกัดจำนวนผลลัพธ์สูงสุดต่อภาพ (กัน JSON ใหญ่)
+CONF_THRES = 0.5
 
-# -------------------------
-# CLASS NAMES (EN + TH)
-# label_id ต้องตรงกับตอน train (1..7)
-# -------------------------
 CLASS_TH = {
     0: "พื้นหลัง",
     1: "สิว",
@@ -40,13 +32,14 @@ CLASS_EN = {
 device = "cuda" if torch.cuda.is_available() else "cpu"
 transform = T.ToTensor()
 
-model = None  # โหลดตอน startup
+model = None
 
-@app.on_event("startup")
-def startup():
+def get_model():
     global model
-    model = load_model(device=device)
-    model.eval()
+    if model is None:
+        model = load_model(device=device)
+        model.eval()
+    return model
 
 @app.get("/health")
 def health_check():
@@ -54,10 +47,8 @@ def health_check():
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    m = get_model()
 
-    # --- read image ---
     try:
         img = Image.open(file.file).convert("RGB")
     except UnidentifiedImageError:
@@ -67,47 +58,32 @@ async def predict(file: UploadFile = File(...)):
 
     x = transform(img).unsqueeze(0).to(device)
 
-    # --- inference ---
     with torch.inference_mode():
-        out = model(x)[0]
+        out = m(x)[0]
 
-    boxes = out.get("boxes", torch.empty((0, 4))).detach().cpu()
     scores = out.get("scores", torch.empty((0,))).detach().cpu()
     labels = out.get("labels", torch.empty((0,))).detach().cpu()
 
-    # --- filter by confidence ---
-    if len(scores) > 0:
-        keep = scores >= CONF_THRES
-        boxes = boxes[keep]
-        scores = scores[keep]
-        labels = labels[keep]
+    if scores.numel() == 0:
+        return {"top1": None, "message": "No detections"}
 
-    # --- cap topk by score ---
-    if len(scores) > TOPK:
-        order = torch.argsort(scores, descending=True)[:TOPK]
-        boxes = boxes[order]
-        scores = scores[order]
-        labels = labels[order]
+    # filter by conf
+    keep = scores >= CONF_THRES
+    scores = scores[keep]
+    labels = labels[keep]
 
-    # --- build detections ---
-    detections = []
-    for b, s, lid in zip(boxes.tolist(), scores.tolist(), labels.tolist()):
-        lid_int = int(lid)
-        det = {
-            "label_id": lid_int,
-            "label_en": CLASS_EN.get(lid_int, f"Unknown_{lid_int}"),
-            "label_th": CLASS_TH.get(lid_int, f"ไม่ทราบ_{lid_int}"),
-            "score": float(s),
-            "box": [float(v) for v in b],  # [x1,y1,x2,y2]
-        }
-        detections.append(det)
+    if scores.numel() == 0:
+        return {"top1": None, "message": f"No detections >= conf {CONF_THRES}"}
 
-    # --- top1 ---
-    top1 = detections[0] if len(detections) > 0 else None
-    if top1 is None and len(scores) > 0:
-        # กรณีมี output แต่ถูกกรองหมด
-        top1 = {"message": f"No detections >= conf {CONF_THRES}"}
+    best_i = int(torch.argmax(scores).item())
+    best_score = float(scores[best_i].item())
+    best_label = int(labels[best_i].item())
 
-    return {
-        "top1": top1
+    top1 = {
+        "label_id": best_label,
+        "label_en": CLASS_EN.get(best_label, f"Unknown_{best_label}"),
+        "label_th": CLASS_TH.get(best_label, f"ไม่ทราบ_{best_label}"),
+        "score": best_score,
     }
+
+    return {"top1": top1}

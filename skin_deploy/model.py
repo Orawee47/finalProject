@@ -5,12 +5,12 @@ from torchvision.models.detection import maskrcnn_resnet50_fpn
 
 MODEL_URL = os.environ.get(
     "MODEL_URL",
-    "https://github.com/Orawee47/finalProject/releases/download/v1.0-maskrcnn/best_map5095.pth"
+    "https://github.com/Orawee47/finalProject/releases/download/v1.1-maskrcnn/best.pth"
 )
 
 # ✅ ใช้ path ภายในโปรเจค (Render / Docker ปลอดภัย)
 MODEL_DIR = "models"
-MODEL_FILENAME = "best_map5095.pth"
+MODEL_FILENAME = "best.pth"
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILENAME)
 
 

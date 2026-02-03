@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from PIL import Image, UnidentifiedImageError
+import io
 import torch
 import torchvision.transforms as T
 from model import load_model
@@ -34,32 +35,53 @@ transform = T.ToTensor()
 
 model = None
 
-def get_model():
+@app.on_event("startup")
+def _startup_load_model():
+    """โหลดโมเดลตอน start service เพื่อตัดปัญหา cold-start ยิงแล้ว 502"""
     global model
-    if model is None:
+    try:
         model = load_model(device=device)
         model.eval()
+        # warmup 1 ครั้ง (ช่วยลด spike ตอน request แรก)
+        dummy = torch.zeros(1, 3, 256, 256, device=device)
+        with torch.inference_mode():
+            _ = model(dummy)
+        print("✅ Model loaded & warmed up on", device)
+    except Exception as e:
+        # ให้เห็นใน logs ของ Render ชัด ๆ
+        print("❌ Startup model load failed:", repr(e))
+        model = None
+
+def get_model():
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model not ready (startup failed)")
     return model
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "skin-maskrcnn-api"}
+    return {"status": "ok", "service": "skin-maskrcnn-api", "device": device, "model_ready": model is not None}
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     m = get_model()
 
+    # อ่านไฟล์แบบชัวร์ (Render/ASGI บางที file.file มี edge case)
     try:
-        img = Image.open(file.file).convert("RGB")
+        content = await file.read()
+        img = Image.open(io.BytesIO(content)).convert("RGB")
     except UnidentifiedImageError:
         raise HTTPException(status_code=400, detail="Invalid image file")
-    except Exception:
-        raise HTTPException(status_code=400, detail="Cannot read image")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot read image: {repr(e)}")
 
     x = transform(img).unsqueeze(0).to(device)
 
-    with torch.inference_mode():
-        out = m(x)[0]
+    try:
+        with torch.inference_mode():
+            out = m(x)[0]
+    except Exception as e:
+        # ถ้าโมเดลล้ม/oom จะได้เห็น error
+        raise HTTPException(status_code=500, detail=f"Inference failed: {repr(e)}")
 
     scores = out.get("scores", torch.empty((0,))).detach().cpu()
     labels = out.get("labels", torch.empty((0,))).detach().cpu()
@@ -67,7 +89,6 @@ async def predict(file: UploadFile = File(...)):
     if scores.numel() == 0:
         return {"top1": None, "message": "No detections"}
 
-    # filter by conf
     keep = scores >= CONF_THRES
     scores = scores[keep]
     labels = labels[keep]
@@ -79,11 +100,11 @@ async def predict(file: UploadFile = File(...)):
     best_score = float(scores[best_i].item())
     best_label = int(labels[best_i].item())
 
-    top1 = {
-        "label_id": best_label,
-        "label_en": CLASS_EN.get(best_label, f"Unknown_{best_label}"),
-        "label_th": CLASS_TH.get(best_label, f"ไม่ทราบ_{best_label}"),
-        "score": best_score,
+    return {
+        "top1": {
+            "label_id": best_label,
+            "label_en": CLASS_EN.get(best_label, f"Unknown_{best_label}"),
+            "label_th": CLASS_TH.get(best_label, f"ไม่ทราบ_{best_label}"),
+            "score": best_score,
+        }
     }
-
-    return {"top1": top1}

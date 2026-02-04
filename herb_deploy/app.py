@@ -34,6 +34,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
+from fastapi.responses import HTMLResponse
 
 # =========================
 # CONFIG
@@ -265,3 +266,73 @@ async def predict(
         "top_prediction": top_prediction,
         "detections": detections,
     }
+
+@app.get("/predict", response_class=HTMLResponse)
+def predict_page():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>YOLO Predict Test</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 600px; margin: 40px auto; }
+    input, button { margin-top: 10px; }
+    pre { background: #f4f4f4; padding: 10px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h2>YOLO /predict – Test Page</h2>
+
+  <label>API Key</label><br/>
+  <input type="text" id="apiKey" placeholder="Enter API Key" style="width:100%;" />
+
+  <br/><br/>
+  <label>Select image</label><br/>
+  <input type="file" id="fileInput" accept="image/*" />
+
+  <br/><br/>
+  <button onclick="send()">Predict</button>
+
+  <h3>Response</h3>
+  <pre id="output">-</pre>
+
+  <script>
+    async function send() {
+      const apiKey = document.getElementById("apiKey").value;
+      const fileInput = document.getElementById("fileInput");
+      const output = document.getElementById("output");
+
+      if (!apiKey) {
+        alert("Please enter API key");
+        return;
+      }
+      if (!fileInput.files.length) {
+        alert("Please select an image");
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("file", fileInput.files[0]);
+
+      output.textContent = "Sending...";
+
+      try {
+        const res = await fetch("/predict", {
+          method: "POST",
+          headers: {
+            "x-api-key": apiKey
+          },
+          body: formData
+        });
+
+        const text = await res.text();
+        output.textContent = text;
+      } catch (err) {
+        output.textContent = err.toString();
+      }
+    }
+  </script>
+</body>
+</html>
+"""

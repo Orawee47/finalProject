@@ -1,0 +1,10 @@
+API: POST https://finalproject-3-uprs.onrender.com/predict 
+
+Headers: x-api-key: <herbs-func-66xe25> 
+
+Body: multipart/form-data 
+file = image (jpg/png/webp) 
+
+Response: 
+- top_prediction: class_name + confidence 
+- detections: [{ class_name, confidence, box{x1,y1,x2,y2} }]

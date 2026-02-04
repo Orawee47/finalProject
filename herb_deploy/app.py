@@ -46,7 +46,7 @@ from ultralytics import YOLO
 # =========================
 # CONFIG
 # =========================
-MODEL_PATH = "best.pt"
+MODEL_PATH = "yolov8s(lr_4(aug)).pt"
 
 # Class names from your data.yaml (ORDER MUST MATCH)
 CLASS_NAMES = [

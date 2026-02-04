@@ -1,37 +1,22 @@
+# app.py
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from PIL import Image, UnidentifiedImageError
 import io
 import os
+import threading
+import gc
+
 import torch
 import torchvision.transforms as T
+
 from model import load_model
 
-# ============================================================
-# 0) ลด RAM / ลด spike (สำคัญบน Render free 512MB)
-# ============================================================
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-
-torch.set_num_threads(1)
-
-# ============================================================
-# 1) Config
-# ============================================================
 app = FastAPI(title="Skin Mask R-CNN API", version="1.0")
 
 CONF_THRES = float(os.environ.get("CONF_THRES", "0.5"))
+MAX_SIDE = int(os.environ.get("MAX_SIDE", "512"))  # ✅ ลดจาก 800 -> 512 ช่วยลด RAM ชัด
+NUM_CLASSES = int(os.environ.get("NUM_CLASSES", "8"))
 
-# Render free -> แนะนำ 640 หรือ 512 ถ้ายัง OOM
-MAX_SIDE = int(os.environ.get("MAX_SIDE", "640"))
-
-# บังคับ CPU บน Render (ลดปัญหา + RAM spike)
-FORCE_CPU = os.environ.get("FORCE_CPU", "1")  # default=1
-device = "cpu" if FORCE_CPU == "1" else ("cuda" if torch.cuda.is_available() else "cpu")
-
-# ============================================================
-# 2) label map
-# ============================================================
 CLASS_TH = {
     0: "พื้นหลัง",
     1: "สิว",
@@ -53,11 +38,16 @@ CLASS_EN = {
     7: "Vitiligo",
 }
 
-# ============================================================
-# 3) Image preprocess
-#    - resize ก่อน ToTensor เพื่อลด RAM / ลดโอกาส OOM
-# ============================================================
+# ✅ Render free = CPU
+device = "cpu"
+
+# ✅ ToTensor ของ torchvision ใช้ได้กับ Mask R-CNN (ได้ float [0..1] shape [C,H,W])
 transform = T.ToTensor()
+
+_model = None
+_model_err = None
+_model_lock = threading.Lock()
+
 
 def resize_max_side(img: Image.Image, max_side: int):
     w, h = img.size
@@ -68,44 +58,41 @@ def resize_max_side(img: Image.Image, max_side: int):
     nw, nh = int(w * scale), int(h * scale)
     return img.resize((nw, nh), Image.BILINEAR)
 
-# ============================================================
-# 4) Model lifecycle
-# ============================================================
-model = None
 
-def _warmup_maskrcnn(m, device: str):
-    """
-    Mask R-CNN (torchvision) ตอน inference ต้องรับเป็น list[Tensor]
-    """
-    m.eval()
-    dummy = torch.zeros(3, 256, 256, device=device)  # [C,H,W]
-    with torch.inference_mode():
-        _ = m([dummy])  # ✅ list[Tensor]
+def _load_model_bg():
+    global _model, _model_err
+    try:
+        m = load_model(device=device, num_classes=NUM_CLASSES)
+        # ✅ warmup ที่ถูกต้องสำหรับ detection: list[tensor]
+        dummy = [torch.zeros(3, 256, 256, device=device)]
+        with torch.inference_mode():
+            _ = m(dummy)
+        _model = m
+        _model_err = None
+        print("✅ Model loaded & warmed up on", device)
+    except Exception as e:
+        _model = None
+        _model_err = repr(e)
+        print("❌ Model load failed:", _model_err)
+    finally:
+        gc.collect()
+
 
 @app.on_event("startup")
-def _startup_load_model():
-    """
-    โหลดตอนเริ่ม เพื่อให้ /predict ไม่ cold-start แล้ว timeout
-    ถ้า OOM ตอน startup ให้ลด MAX_SIDE หรือไป lazy load
-    """
-    global model
-    try:
-        # ✅ โหลดด้วย device ที่กำหนด (แนะนำ cpu บน Render)
-        model = load_model(device=device)
-        model.eval()
+def startup():
+    # ✅ เปิดพอร์ตก่อน แล้วค่อยโหลดโมเดลใน background กัน Render scan ไม่เจอ port
+    t = threading.Thread(target=_load_model_bg, daemon=True)
+    t.start()
 
-        # ✅ warmup ให้ถูกกับ Mask R-CNN
-        _warmup_maskrcnn(model, device)
-
-        print(f"✅ Model loaded & warmed up on device={device} | MAX_SIDE={MAX_SIDE} | CONF_THRES={CONF_THRES}")
-    except Exception as e:
-        print("❌ Startup model load failed:", repr(e))
-        model = None
 
 def get_model():
-    if model is None:
-        raise HTTPException(status_code=503, detail="Model not ready (startup failed)")
-    return model
+    if _model is None:
+        detail = "Model not ready"
+        if _model_err:
+            detail += f" (startup failed: {_model_err})"
+        raise HTTPException(status_code=503, detail=detail)
+    return _model
+
 
 @app.get("/health")
 def health_check():
@@ -113,19 +100,18 @@ def health_check():
         "status": "ok",
         "service": "skin-maskrcnn-api",
         "device": device,
-        "model_ready": model is not None,
+        "model_ready": _model is not None,
+        "error": _model_err,
         "max_side": MAX_SIDE,
         "conf_thres": CONF_THRES,
     }
 
-# ============================================================
-# 5) Predict endpoint
-# ============================================================
+
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     m = get_model()
 
-    # ---- read image safely ----
+    # read image
     try:
         content = await file.read()
         img = Image.open(io.BytesIO(content)).convert("RGB")
@@ -134,24 +120,22 @@ async def predict(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot read image: {repr(e)}")
 
-    # ✅ resize ก่อน ToTensor
+    # ✅ resize ลด RAM ก่อน
     img = resize_max_side(img, MAX_SIDE)
 
-    # torchvision Mask R-CNN: inference expects list[Tensor]
+    # ✅ Mask R-CNN (torchvision) ต้องเป็น List[Tensor]
     x = transform(img).to(device)  # [C,H,W]
     inputs = [x]
 
     try:
         with torch.inference_mode():
-            out = m(inputs)[0]  # dict
-    except RuntimeError as e:
-        # เผื่อเจอ OOM/RuntimeError
-        msg = repr(e)
-        if "out of memory" in msg.lower():
-            raise HTTPException(status_code=500, detail=f"OOM during inference. Try lower MAX_SIDE. err={msg}")
-        raise HTTPException(status_code=500, detail=f"Inference failed: {msg}")
+            out = m(inputs)[0]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference failed: {repr(e)}")
+    finally:
+        # ช่วยลด peak ในเครื่อง RAM น้อย
+        del inputs, x
+        gc.collect()
 
     scores = out.get("scores", torch.empty((0,))).detach().cpu()
     labels = out.get("labels", torch.empty((0,), dtype=torch.int64)).detach().cpu()

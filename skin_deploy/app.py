@@ -18,7 +18,7 @@ app = FastAPI(title="Skin Mask R-CNN API", version="1.0")
 # CONFIG
 # -------------------------
 CONF_THRES = float(os.environ.get("CONF_THRES", "0.5"))
-MAX_SIDE = int(os.environ.get("MAX_SIDE", "512"))          # ลดภาพก่อน infer กัน OOM
+MAX_SIDE = int(os.environ.get("MAX_SIDE", "384"))          # ลดภาพก่อน infer กัน OOM
 NUM_CLASSES = int(os.environ.get("NUM_CLASSES", "8"))
 WARMUP_SIDE = int(os.environ.get("WARMUP_SIDE", "128"))    # ลด warmup กัน spike
 TORCH_THREADS = int(os.environ.get("TORCH_THREADS", "1"))

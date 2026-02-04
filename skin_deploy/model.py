@@ -5,7 +5,7 @@ import gc
 import requests
 import torch
 
-MODEL_URL = os.environ.get("MODEL_URL", "")
+MODEL_URL = os.environ.get("MODEL_URL", "https://github.com/Orawee47/finalProject/releases/download/v1.1-maskrcnn/best.pth")
 CACHE_DIR = Path(os.environ.get("MODEL_DIR", "/tmp/models"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_PATH = CACHE_DIR / "best.pth"

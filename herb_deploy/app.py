@@ -1,27 +1,19 @@
-# app.py (production-ready + API Key protected, Render-ready)
+# app.py (Render + Netlify-ready, API Key protected)
 #
-# Features:
-# - API Key protection via header: x-api-key
-# - Standard success/error responses
-# - Upload size limit
-# - Resize for faster inference + scales boxes back to original image size
-# - /health and /classes endpoints
+# Env vars (Render):
+#   API_KEY=<secret>
+#   ALLOWED_ORIGINS=https://xxxx.netlify.app,https://yourdomain.com
 #
 # Endpoints:
 #   GET  /        -> info
 #   GET  /health  -> health check
 #   GET  /classes -> class list
-#   POST /predict -> multipart/form-data field "file"
+#   POST /predict -> multipart/form-data field "file" + header x-api-key
 #
-# Required header for /predict:
-#   x-api-key: <your API_KEY>
-#
-# Env vars (Render):
-#   API_KEY=<secret>
-#
-# Note:
-# - For now CORS is open for testing (ALLOW_ALL_ORIGINS_FOR_NOW=True).
-#   When you connect Netlify, lock it down.
+# Notes:
+# - CORS locked by ALLOWED_ORIGINS (no "*")
+# - API key required for /predict only
+# - Upload size limit + resize for faster inference + scale boxes back
 
 import io
 import os
@@ -46,7 +38,7 @@ from ultralytics import YOLO
 # =========================
 # CONFIG
 # =========================
-MODEL_PATH = "best.pt"
+MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")  # ✅ เปลี่ยนได้ผ่าน env ถ้าต้องการ
 
 # Class names from your data.yaml (ORDER MUST MATCH)
 CLASS_NAMES = [
@@ -64,30 +56,31 @@ CLASS_NAMES = [
     "Turmeric",
 ]
 
-# Security
-API_KEY = os.getenv("API_KEY")  # must be set on Render
-
-# For now (not connecting Netlify yet): allow all origins for testing
-ALLOW_ALL_ORIGINS_FOR_NOW = True
-
 # Upload & processing limits
-MAX_UPLOAD_MB = 5          # max upload size (MB)
-MAX_IMAGE_SIDE = 1280      # resize longest side to this (for speed)
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "5"))
+MAX_IMAGE_SIDE = int(os.getenv("MAX_IMAGE_SIDE", "1280"))
+
+# CORS: lock to Netlify (or your domains)
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")
+ORIGINS = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
 
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="YOLOv8s SkinHerb API", version="3.0.0")
+app = FastAPI(title="YOLO SkinHerb API", version="3.1.0")
 
-if ALLOW_ALL_ORIGINS_FOR_NOW:
-    # If allow_origins=["*"], credentials must be False
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS must be set for browser clients (Netlify)
+# If ORIGINS is empty, we still allow localhost for dev only.
+if not ORIGINS:
+    ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],  # allow x-api-key
+)
 
 # =========================
 # MODEL LOAD (once)
@@ -105,20 +98,17 @@ def get_class_name(cls_id: int) -> str:
         return CLASS_NAMES[cls_id]
     return f"unknown_{cls_id}"
 
-
 def standard_error(message: str, code: str = "BAD_REQUEST", status_code: int = 400):
     return JSONResponse(
         status_code=status_code,
         content={"ok": False, "error": {"code": code, "message": message}},
     )
 
-
 def read_image_to_rgb_pil(image_bytes: bytes) -> Image.Image:
     try:
         return Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image file.")
-
 
 def resize_keep_aspect(pil_img: Image.Image, max_side: int) -> Image.Image:
     w, h = pil_img.size
@@ -130,18 +120,16 @@ def resize_keep_aspect(pil_img: Image.Image, max_side: int) -> Image.Image:
     new_h = int(round(h * scale))
     return pil_img.resize((new_w, new_h), Image.BILINEAR)
 
-
-def require_api_key(x_api_key: str = Header(default="")):
+def require_api_key(x_api_key: str = Header(default="", alias="x-api-key")):
     """
     Require x-api-key header to match API_KEY env var.
-    This protects /predict from public abuse.
+    Protects /predict from public abuse.
     """
-    if not API_KEY:
-        # Misconfiguration on server
+    api_key = os.getenv("API_KEY")
+    if not api_key:
         raise HTTPException(status_code=500, detail="API_KEY not set on server")
-    if x_api_key != API_KEY:
+    if x_api_key != api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
-
 
 # =========================
 # GLOBAL ERROR FORMATTER
@@ -152,11 +140,9 @@ async def http_exception_handler(_: Request, exc: HTTPException):
     code = "UNAUTHORIZED" if exc.status_code == 401 else "HTTP_EXCEPTION"
     return standard_error(detail, code=code, status_code=exc.status_code)
 
-
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_: Request, __: Exception):
     return standard_error("Internal server error", code="INTERNAL_ERROR", status_code=500)
-
 
 # =========================
 # ROUTES
@@ -165,8 +151,8 @@ async def unhandled_exception_handler(_: Request, __: Exception):
 def root() -> Dict[str, Any]:
     return {
         "ok": True,
-        "message": "YOLOv8s API is running",
-        "model": "YOLOv8s",
+        "message": "YOLO API is running",
+        "model_path": MODEL_PATH,
         "num_classes": len(CLASS_NAMES),
         "classes": CLASS_NAMES,
         "limits": {
@@ -175,14 +161,18 @@ def root() -> Dict[str, Any]:
         },
         "security": {
             "api_key_required_for_predict": True,
+            "allowed_origins": ORIGINS,  # useful for debugging
         },
     }
 
-
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"ok": True, "status": "healthy"}
-
+    return {
+        "ok": True,
+        "status": "healthy",
+        "api_key_set": bool(os.getenv("API_KEY")),
+        "allowed_origins_set": bool(os.getenv("ALLOWED_ORIGINS")),
+    }
 
 @app.get("/classes")
 def classes() -> Dict[str, Any]:
@@ -192,11 +182,10 @@ def classes() -> Dict[str, Any]:
         "classes": [{"class_id": i, "class_name": n} for i, n in enumerate(CLASS_NAMES)],
     }
 
-
 @app.post("/predict")
 async def predict(
     file: UploadFile = File(...),
-    _: Any = Depends(require_api_key),  # ✅ API key required
+    _: Any = Depends(require_api_key),
 ) -> Dict[str, Any]:
     # Content-type guard
     if file.content_type and not file.content_type.startswith("image/"):
@@ -257,7 +246,7 @@ async def predict(
                 }
             )
 
-    # Top prediction (highest confidence) - useful for UI
+    # Top prediction (highest confidence)
     top_prediction: Optional[Dict[str, Any]] = None
     if detections:
         best = max(detections, key=lambda d: d["confidence"])
@@ -269,7 +258,7 @@ async def predict(
 
     return {
         "ok": True,
-        "model": "YOLOv8s",
+        "model": "YOLO",
         "image": {"width": orig_w, "height": orig_h},
         "processed_image": {"width": proc_w, "height": proc_h},
         "inference_ms": int((end - start) * 1000),

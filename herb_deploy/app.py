@@ -1,19 +1,27 @@
-# app.py (Render + Netlify-ready, API Key protected)
+# app.py (FULL VERSION) - Render + Netlify-ready, API Key protected
+#
+# ✅ Supports multiple origins (Render test + Netlify prod + Netlify preview)
+# ✅ API Key protection for /predict via header: x-api-key
+# ✅ Standard JSON error format
+# ✅ Upload size limit
+# ✅ Resize for faster inference + scale boxes back to original image size
+# ✅ Adds `label_key` for stable DB lookup (fixes "not found in database" mismatch)
+# ✅ Optional simple HTML test page at GET /predict
 #
 # Env vars (Render):
-#   API_KEY=<secret>
-#   ALLOWED_ORIGINS=https://xxxx.netlify.app,https://yourdomain.com
+#   API_KEY=<secret>                               (required)
+#   MODEL_PATH=best.pt                             (optional, default best.pt)
+#   MAX_UPLOAD_MB=5                                (optional)
+#   MAX_IMAGE_SIDE=1280                            (optional)
+#   ALLOWED_ORIGINS=https://xxx.netlify.app,https://yyy.onrender.com   (optional)
+#   ALLOWED_ORIGIN_REGEX=https://.*\\.netlify\\.app                    (optional, for Netlify preview)
 #
 # Endpoints:
 #   GET  /        -> info
-#   GET  /health  -> health check
+#   GET  /health  -> health check + env status
 #   GET  /classes -> class list
+#   GET  /predict -> HTML test page (optional)
 #   POST /predict -> multipart/form-data field "file" + header x-api-key
-#
-# Notes:
-# - CORS locked by ALLOWED_ORIGINS (no "*")
-# - API key required for /predict only
-# - Upload size limit + resize for faster inference + scale boxes back
 
 import io
 import os
@@ -32,14 +40,13 @@ from fastapi import (
     Depends,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from ultralytics import YOLO
-from fastapi.responses import HTMLResponse
 
 # =========================
 # CONFIG
 # =========================
-MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")  # ✅ เปลี่ยนได้ผ่าน env ถ้าต้องการ
+MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")
 
 # Class names from your data.yaml (ORDER MUST MATCH)
 CLASS_NAMES = [
@@ -57,27 +64,27 @@ CLASS_NAMES = [
     "Turmeric",
 ]
 
-# Upload & processing limits
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "5"))
 MAX_IMAGE_SIDE = int(os.getenv("MAX_IMAGE_SIDE", "1280"))
 
-# CORS: lock to Netlify (or your domains)
+# CORS allowlist (comma-separated)
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")
+ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX", "")  # e.g. https://.*\\.netlify\\.app
+
 ORIGINS = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
+if not ORIGINS:
+    # dev fallback
+    ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
 
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="YOLO SkinHerb API", version="3.1.0")
-
-# CORS must be set for browser clients (Netlify)
-# If ORIGINS is empty, we still allow localhost for dev only.
-if not ORIGINS:
-    ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
+app = FastAPI(title="YOLO SkinHerb API", version="3.2.0")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX or None,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],  # allow x-api-key
@@ -99,17 +106,25 @@ def get_class_name(cls_id: int) -> str:
         return CLASS_NAMES[cls_id]
     return f"unknown_{cls_id}"
 
+
+def to_label_key(name: str) -> str:
+    # stable key for DB lookup
+    return name.strip().lower().replace(" ", "_").replace("-", "_")
+
+
 def standard_error(message: str, code: str = "BAD_REQUEST", status_code: int = 400):
     return JSONResponse(
         status_code=status_code,
         content={"ok": False, "error": {"code": code, "message": message}},
     )
 
+
 def read_image_to_rgb_pil(image_bytes: bytes) -> Image.Image:
     try:
         return Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image file.")
+
 
 def resize_keep_aspect(pil_img: Image.Image, max_side: int) -> Image.Image:
     w, h = pil_img.size
@@ -120,6 +135,7 @@ def resize_keep_aspect(pil_img: Image.Image, max_side: int) -> Image.Image:
     new_w = int(round(w * scale))
     new_h = int(round(h * scale))
     return pil_img.resize((new_w, new_h), Image.BILINEAR)
+
 
 def require_api_key(x_api_key: str = Header(default="", alias="x-api-key")):
     """
@@ -132,6 +148,7 @@ def require_api_key(x_api_key: str = Header(default="", alias="x-api-key")):
     if x_api_key != api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
+
 # =========================
 # GLOBAL ERROR FORMATTER
 # =========================
@@ -141,9 +158,11 @@ async def http_exception_handler(_: Request, exc: HTTPException):
     code = "UNAUTHORIZED" if exc.status_code == 401 else "HTTP_EXCEPTION"
     return standard_error(detail, code=code, status_code=exc.status_code)
 
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_: Request, __: Exception):
     return standard_error("Internal server error", code="INTERNAL_ERROR", status_code=500)
+
 
 # =========================
 # ROUTES
@@ -160,11 +179,13 @@ def root() -> Dict[str, Any]:
             "max_upload_mb": MAX_UPLOAD_MB,
             "max_image_side": MAX_IMAGE_SIDE,
         },
-        "security": {
-            "api_key_required_for_predict": True,
-            "allowed_origins": ORIGINS,  # useful for debugging
+        "security": {"api_key_required_for_predict": True},
+        "cors": {
+            "allowed_origins": ORIGINS,
+            "allowed_origin_regex": ALLOWED_ORIGIN_REGEX or None,
         },
     }
+
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
@@ -173,15 +194,18 @@ def health() -> Dict[str, Any]:
         "status": "healthy",
         "api_key_set": bool(os.getenv("API_KEY")),
         "allowed_origins_set": bool(os.getenv("ALLOWED_ORIGINS")),
+        "allowed_origin_regex_set": bool(os.getenv("ALLOWED_ORIGIN_REGEX")),
     }
+
 
 @app.get("/classes")
 def classes() -> Dict[str, Any]:
     return {
         "ok": True,
         "num_classes": len(CLASS_NAMES),
-        "classes": [{"class_id": i, "class_name": n} for i, n in enumerate(CLASS_NAMES)],
+        "classes": [{"class_id": i, "class_name": n, "label_key": to_label_key(n)} for i, n in enumerate(CLASS_NAMES)],
     }
+
 
 @app.post("/predict")
 async def predict(
@@ -232,6 +256,7 @@ async def predict(
 
         for box, conf, cls_id in zip(boxes, confs, clss):
             cls_id_int = int(cls_id)
+            class_name = get_class_name(cls_id_int)
 
             x1 = int(round(float(box[0]) * scale_x))
             y1 = int(round(float(box[1]) * scale_y))
@@ -241,7 +266,8 @@ async def predict(
             detections.append(
                 {
                     "class_id": cls_id_int,
-                    "class_name": get_class_name(cls_id_int),
+                    "class_name": class_name,
+                    "label_key": to_label_key(class_name),  # ✅ stable DB lookup key
                     "confidence": round(float(conf), 4),
                     "box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                 }
@@ -254,6 +280,7 @@ async def predict(
         top_prediction = {
             "class_id": best["class_id"],
             "class_name": best["class_name"],
+            "label_key": best["label_key"],  # ✅ use this to query DB
             "confidence": best["confidence"],
         }
 
@@ -267,6 +294,8 @@ async def predict(
         "detections": detections,
     }
 
+
+# Optional: Simple HTML test page (helps when testing without Swagger/Postman)
 @app.get("/predict", response_class=HTMLResponse)
 def predict_page():
     return """
@@ -276,22 +305,26 @@ def predict_page():
   <meta charset="UTF-8" />
   <title>YOLO Predict Test</title>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 600px; margin: 40px auto; }
+    body { font-family: Arial, sans-serif; max-width: 680px; margin: 40px auto; }
     input, button { margin-top: 10px; }
     pre { background: #f4f4f4; padding: 10px; overflow-x: auto; }
+    .row { margin-bottom: 12px; }
   </style>
 </head>
 <body>
   <h2>YOLO /predict – Test Page</h2>
+  <p>Upload an image and call POST /predict with x-api-key.</p>
 
-  <label>API Key</label><br/>
-  <input type="text" id="apiKey" placeholder="Enter API Key" style="width:100%;" />
+  <div class="row">
+    <label>API Key</label><br/>
+    <input type="text" id="apiKey" placeholder="Enter API Key" style="width:100%;" />
+  </div>
 
-  <br/><br/>
-  <label>Select image</label><br/>
-  <input type="file" id="fileInput" accept="image/*" />
+  <div class="row">
+    <label>Select image</label><br/>
+    <input type="file" id="fileInput" accept="image/*" />
+  </div>
 
-  <br/><br/>
   <button onclick="send()">Predict</button>
 
   <h3>Response</h3>
@@ -303,14 +336,8 @@ def predict_page():
       const fileInput = document.getElementById("fileInput");
       const output = document.getElementById("output");
 
-      if (!apiKey) {
-        alert("Please enter API key");
-        return;
-      }
-      if (!fileInput.files.length) {
-        alert("Please select an image");
-        return;
-      }
+      if (!apiKey) { alert("Please enter API key"); return; }
+      if (!fileInput.files.length) { alert("Please select an image"); return; }
 
       const formData = new FormData();
       formData.append("file", fileInput.files[0]);
@@ -320,9 +347,7 @@ def predict_page():
       try {
         const res = await fetch("/predict", {
           method: "POST",
-          headers: {
-            "x-api-key": apiKey
-          },
+          headers: { "x-api-key": apiKey },
           body: formData
         });
 

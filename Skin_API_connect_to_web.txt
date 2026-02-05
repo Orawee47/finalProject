@@ -1,0 +1,5 @@
+API: https://b37b065bacf4.ngrok-free.app
+Method: POST /predict
+Header: X-API-Key: skin-func-66xe25
+Body: form-data -> file = image
+Response: { label_en, label_th, score }

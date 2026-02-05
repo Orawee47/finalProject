@@ -83,12 +83,12 @@ app = FastAPI(title="YOLO SkinHerb API", version="3.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ORIGINS,
-    allow_origin_regex=ALLOWED_ORIGIN_REGEX or None,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],  # allow x-api-key
+    allow_origins=["*"],            # ✅ อนุญาตทุก origin
+    allow_credentials=False,        # ✅ ต้องเป็น False ถ้าใช้ "*"
+    allow_methods=["*"],            # ✅ ทุก method
+    allow_headers=["*"],            # ✅ ทุก header รวม x-api-key
 )
+
 
 # =========================
 # MODEL LOAD (once)

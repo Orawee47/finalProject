@@ -1,6 +1,8 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from PIL import Image, UnidentifiedImageError
+# app.py
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
+from PIL import Image, UnidentifiedImageError
 import io
 import os
 import threading
@@ -14,10 +16,20 @@ from model import load_model
 
 app = FastAPI(title="Skin Mask R-CNN API", version="1.0")
 
+# =========================
+# ENV CONFIG
+# =========================
 CONF_THRES = float(os.environ.get("CONF_THRES", "0.5"))
 MAX_SIDE = int(os.environ.get("MAX_SIDE", "512"))      # ลดไว้ก่อน กัน OOM
 NUM_CLASSES = int(os.environ.get("NUM_CLASSES", "8"))
 
+# ✅ API KEY (ตั้งใน Colab/Render env: API_KEY=...)
+API_KEY = os.environ.get("API_KEY", "").strip()
+API_KEY_HEADER_NAME = os.environ.get("API_KEY_HEADER", "X-API-Key")
+
+# =========================
+# CLASS NAMES
+# =========================
 CLASS_TH = {
     0: "พื้นหลัง",
     1: "สิว",
@@ -41,7 +53,6 @@ CLASS_EN = {
 
 # Render free → CPU
 device = "cpu"
-
 transform = T.ToTensor()
 
 _model = None
@@ -50,13 +61,30 @@ _model_err = None
 # =========================
 # CORS CONFIG
 # =========================
+# แนะนำให้ระบุ origin จริงตอนโปรดักชัน เช่น:
+# allow_origins=["https://your-netlify-site.netlify.app", "https://your-render-frontend.onrender.com"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (for development)
+    allow_origins=["*"],  # dev ได้ / โปรดักชันควรล็อกโดเมน
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# =========================
+# API KEY DEPENDENCY
+# =========================
+api_key_header = APIKeyHeader(name=API_KEY_HEADER_NAME, auto_error=False)
+
+def require_api_key(x_api_key: str = Depends(api_key_header)):
+    """
+    - ถ้าไม่ได้ตั้ง API_KEY ใน env -> จะไม่บังคับ (สะดวกตอนทดสอบ)
+    - ถ้าตั้ง API_KEY แล้ว -> ต้องส่ง header X-API-Key: <key>
+    """
+    if not API_KEY:
+        return  # no auth enforced
+    if not x_api_key or x_api_key.strip() != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 def resize_max_side(img: Image.Image, max_side: int):
@@ -115,11 +143,16 @@ def health():
         "error": _model_err,
         "max_side": MAX_SIDE,
         "conf_thres": CONF_THRES,
+        "api_key_enabled": bool(API_KEY),
+        "api_key_header": API_KEY_HEADER_NAME,
     }
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(
+    file: UploadFile = File(...),
+    _: None = Depends(require_api_key),   # ✅ บังคับใช้ API key ตรงนี้
+):
     m = get_model()
 
     # read image
